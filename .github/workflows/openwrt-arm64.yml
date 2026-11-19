@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: openwrt-arm64-${{ github.ref_name }}
+  group: openwrt-apk-${{ github.ref_name }}
   cancel-in-progress: true
 
 env:
@@ -194,10 +194,13 @@ jobs:
             -e 's/^PKG_RELEASE:=2$/PKG_RELEASE:=3/' \
             -e 's/^PKG_LICENSE:=AGPL-3.0-only$/PKG_LICENSE:=GPL-3.0-only/' \
             "$feed/honk/Makefile"
-          jq -n --arg core "$GITHUB_SHA" --arg integration "$PACKAGING_REVISION" \
-            --arg hash "$hash" \
-            '{core_repository:"limi-l/honk",core_commit:$core,integration_commit:$integration,core_archive_sha256:$hash}' \
+          patch_hash=$(sha256sum integration/ci/patches/honk-core-config-validate.patch | cut -d' ' -f1)
+          jq -n --arg repository "$GITHUB_REPOSITORY" --arg commit "$GITHUB_SHA" \
+            --arg integration "$PACKAGING_REVISION" --arg hash "$hash" \
+            --arg patch "$patch_hash" --arg version "$HONK_VERSION_OVERRIDE" --arg features "$FEATURES" \
+            '{core:{repository:$repository,commit:$commit,version:$version,lane:"arm64-follow",features:$features,architectures:["aarch64"],configuration_patch_sha256:$patch}, integration_commit:$integration,core_archive_sha256:$hash}' \
             > "$feed/honk/generated-provenance.json"
+          jq -e --arg commit "$GITHUB_SHA" '.core.commit == $commit' "$feed/honk/generated-provenance.json"
 
       - name: Check out the project's pinned SDK action
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
