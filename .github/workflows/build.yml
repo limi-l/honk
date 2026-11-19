@@ -1,14 +1,9 @@
 name: Build
 
-# This fork deploys exactly one binary: x86_64-unknown-linux-musl, full
-# variant. Release only reacts to v*/debug.* tags, and its release job needs
-# repository write permissions a fork cannot grant, so a push to main used to
-# leave no fresh binary behind at all — the only way to get one was to fire a
-# manual dispatch. This workflow builds the deployed target on every push to
-# main and keeps the artifact for 30 days instead of Release's one.
+# Static ARM64 build of the DNS follow branch for routers.
 on:
   push:
-    branches: [main]
+    branches: [build/arm64-follow]
     paths:
       - "crates/**"
       - "ci/**"
@@ -30,10 +25,11 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   HONK_VERSION_OVERRIDE: v0.1.0-beta.7
+  HONK_TARGET: aarch64-unknown-linux-musl
 
 jobs:
   build:
-    name: build x86_64-unknown-linux-musl-full
+    name: Build ARM64 musl with Doona
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -45,7 +41,7 @@ jobs:
       - name: Resolve artifact name
         run: |
           set -euo pipefail
-          echo "ARTIFACT_NAME=honk-core-${GITHUB_REF_NAME//\//-}-x86_64-unknown-linux-musl-full" >> "$GITHUB_ENV"
+          echo "ARTIFACT_NAME=honk-core-${GITHUB_REF_NAME//\//-}-${HONK_TARGET}-full" >> "$GITHUB_ENV"
           echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
 
       - name: Read Rust toolchains
@@ -59,7 +55,7 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: ${{ steps.toolchain.outputs.stable }}
-          target: x86_64-unknown-linux-musl
+          target: ${{ env.HONK_TARGET }}
 
       - name: Install Rust nightly (for the eBPF object)
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -69,7 +65,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: build-x86_64-unknown-linux-musl-full
+          key: build-${{ env.HONK_TARGET }}-full
           cache-on-failure: true
           workspaces: |
             . -> target
@@ -79,7 +75,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev pkg-config cmake libclang-dev zstd
+          sudo apt-get install -y clang llvm libbpf-dev pkg-config cmake libclang-dev zstd qemu-user
 
       - name: Install pinned bpf-linker
         run: |
@@ -102,7 +98,7 @@ jobs:
       # aya refuses objects without BTF ("no BTF parsed for object") — fail
       # the build here instead of at runtime on a gateway.
       - name: Verify eBPF object has BTF
-        run: readelf -S crates/honk-ebpf/target/bpfel-unknown-none/release/honk-ebpf | grep -q '\.BTF'
+        run: readelf -S crates/honk-ebpf/target/bpfel-unknown-none/release/honk-ebpf | grep '\.BTF' > /dev/null
 
       # boring-sys (BoringSSL, C++) needs a clang-compatible target toolchain:
       # under cross compilation CMake injects clang-style --target flags into
@@ -128,7 +124,7 @@ jobs:
       - name: Build honk-core (cross via zig wrappers)
         run: |
           set -euo pipefail
-          T=x86_64-unknown-linux-musl
+          T="$HONK_TARGET"
           export ZIGCC_TARGET="${T/-unknown/}"
           # cc crate wants lowercase CC_<target_with_underscores>; cargo
           # wants uppercase CARGO_TARGET_<TARGET>.
@@ -151,7 +147,7 @@ jobs:
           set -euo pipefail
           name="$ARTIFACT_NAME"
           mkdir -p "dist/$name"
-          cp "target/x86_64-unknown-linux-musl/release/honk-core" "dist/$name/"
+          cp "target/$HONK_TARGET/release/honk-core" "dist/$name/"
           cp LICENSE README.md "dist/$name/"
           # Both editions keep their own notices; their GPL-3.0-only license
           # must match the top-level LICENSE.
@@ -167,20 +163,20 @@ jobs:
           done
           tar -czf "$name.tar.gz" -C dist "$name"
 
-      - name: Start the packaged binary
+      - name: Verify and start the packaged ARM64 binary
         run: |
           set -euo pipefail
           smoke_dir=$(mktemp -d "$RUNNER_TEMP/build-smoke.XXXXXX")
           trap 'rm -rf "$smoke_dir"' EXIT
           tar -xzf "$ARTIFACT_NAME.tar.gz" -C "$smoke_dir"
-          "$smoke_dir/$ARTIFACT_NAME/honk-core" --version
+          binary="$smoke_dir/$ARTIFACT_NAME/honk-core"
+          LC_ALL=C readelf -h "$binary" | grep -E 'Machine:[[:space:]]+AArch64$'
+          qemu-aarch64 "$binary" --version
 
-      # Uploaded under a stable name so the local fetch script can keep using
-      # one download path regardless of which commit was built.
       - name: Upload artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: honk-core-x86_64-unknown-linux-musl-full
+          name: honk-core-${{ env.HONK_TARGET }}-full
           path: ${{ env.ARTIFACT_NAME }}.tar.gz
           retention-days: 30
 
@@ -195,5 +191,5 @@ jobs:
             echo "- sha256: \`$(sha256sum "$ARTIFACT_NAME.tar.gz" | cut -d' ' -f1)\`"
             echo "- kept for 30 days"
             echo ""
-            echo "Fetch it with \`gh/fetch.sh\`, or from this run's Artifacts list."
+            echo "Download it from this run's Artifacts list."
           } >> "$GITHUB_STEP_SUMMARY"
