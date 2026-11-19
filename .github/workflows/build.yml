@@ -32,6 +32,8 @@ jobs:
     name: Build ARM64 musl with Doona
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    outputs:
+      artifact_name: ${{ steps.archive.outputs.name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -39,10 +41,12 @@ jobs:
 
       # Branch names may contain '/', which cannot appear in an asset path.
       - name: Resolve artifact name
+        id: archive
         run: |
           set -euo pipefail
-          echo "ARTIFACT_NAME=honk-core-${GITHUB_REF_NAME//\//-}-${HONK_TARGET}-full" >> "$GITHUB_ENV"
-          echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          name=honk-core-${GITHUB_REF_NAME//\//-}-${HONK_TARGET}-full
+          echo "ARTIFACT_NAME=$name" >> "$GITHUB_ENV"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
 
       - name: Read Rust toolchains
         id: toolchain
@@ -75,7 +79,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev pkg-config cmake libclang-dev zstd qemu-user
+          sudo apt-get install -y clang llvm libbpf-dev pkg-config cmake libclang-dev zstd
 
       - name: Install pinned bpf-linker
         run: |
@@ -163,6 +167,29 @@ jobs:
           done
           tar -czf "$name.tar.gz" -C dist "$name"
 
+      - name: Stage the package for native ARM64 verification
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: honk-arm64-candidate
+          path: ${{ env.ARTIFACT_NAME }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  verify-arm64:
+    name: Verify and publish ARM64 artifact
+    needs: build
+    # QEMU user mode rejects PR_SET_THP_DISABLE, which the jemalloc build
+    # calls before parsing its arguments.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    env:
+      ARTIFACT_NAME: ${{ needs.build.outputs.artifact_name }}
+    steps:
+      - name: Download the candidate package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: honk-arm64-candidate
+
       - name: Verify and start the packaged ARM64 binary
         run: |
           set -euo pipefail
@@ -171,20 +198,21 @@ jobs:
           tar -xzf "$ARTIFACT_NAME.tar.gz" -C "$smoke_dir"
           binary="$smoke_dir/$ARTIFACT_NAME/honk-core"
           LC_ALL=C readelf -h "$binary" | grep -E 'Machine:[[:space:]]+AArch64$'
-          qemu-aarch64 "$binary" --version
+          "$binary" --version
 
       - name: Upload artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: honk-core-${{ env.HONK_TARGET }}-full
           path: ${{ env.ARTIFACT_NAME }}.tar.gz
+          if-no-files-found: error
           retention-days: 30
 
       - name: Record the build
         run: |
           set -euo pipefail
           {
-            echo "### honk-core \`$SHORT_SHA\`"
+            echo "### honk-core \`${GITHUB_SHA:0:7}\`"
             echo ""
             echo "- artifact: \`$ARTIFACT_NAME.tar.gz\`"
             echo "- size: $(du -h "$ARTIFACT_NAME.tar.gz" | cut -f1)"
